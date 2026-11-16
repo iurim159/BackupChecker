@@ -1,0 +1,9 @@
+# Elenco server SQL. Separatore: punto e virgola.
+# server   = IP o nome host. Istanza nominata: 10.0.0.5\SQLEXPRESS  - Porta diversa: 10.0.0.5,1444
+# utente   = login IN SOLA LETTURA creato a mano (es. bkp_readonly)
+# password = password di quel login
+# nome     = (facoltativo) nome del foglio Excel; se vuoto si usa il nome del server SQL
+server;utente;password;nome
+192.168.1.10;bkp_readonly;PasswordLettura1;Gestionale
+192.168.1.20\SQLEXPRESS;bkp_readonly;PasswordLettura2;Magazzino
+192.168.1.30,1444;bkp_readonly;PasswordLettura3;

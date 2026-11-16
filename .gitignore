@@ -1,0 +1,15 @@
+# build
+bin/
+obj/
+publish/
+BackupChecker-portatile/
+.compilazione-temp/
+
+# dati sensibili: MAI su GitHub
+servers.csv
+credenziali-sola-lettura.dat
+*.dat
+
+# report generati
+Report/
+*.xlsx
