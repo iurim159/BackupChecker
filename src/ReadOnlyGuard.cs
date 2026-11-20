@@ -29,11 +29,14 @@ public static class ReadOnlyGuard
         SELECT 'EXECUTE su msdb.dbo.sp_start_job', ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sp_start_job', 'OBJECT', 'EXECUTE'), 0) UNION ALL
         SELECT 'EXECUTE su msdb.dbo.sp_stop_job', ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sp_stop_job', 'OBJECT', 'EXECUTE'), 0) UNION ALL
         SELECT 'manca SELECT su msdb.dbo.backupset', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.backupset', 'OBJECT', 'SELECT'), 0) UNION ALL
+        SELECT 'manca SELECT su msdb.dbo.backupmediafamily', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.backupmediafamily', 'OBJECT', 'SELECT'), 0) UNION ALL
         SELECT 'manca SELECT su msdb.dbo.sysjobs', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobs', 'OBJECT', 'SELECT'), 0) UNION ALL
         SELECT 'manca SELECT su msdb.dbo.sysjobsteps', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobsteps', 'OBJECT', 'SELECT'), 0) UNION ALL
         SELECT 'manca SELECT su msdb.dbo.sysjobschedules', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobschedules', 'OBJECT', 'SELECT'), 0) UNION ALL
         SELECT 'manca SELECT su msdb.dbo.sysschedules', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysschedules', 'OBJECT', 'SELECT'), 0) UNION ALL
-        SELECT 'manca SELECT su msdb.dbo.sysjobhistory', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobhistory', 'OBJECT', 'SELECT'), 0);
+        SELECT 'manca SELECT su msdb.dbo.sysjobhistory', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobhistory', 'OBJECT', 'SELECT'), 0) UNION ALL
+        SELECT 'manca SELECT su msdb.dbo.sysjobactivity', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.sysjobactivity', 'OBJECT', 'SELECT'), 0) UNION ALL
+        SELECT 'manca SELECT su msdb.dbo.syssessions', 1 - ISNULL(HAS_PERMS_BY_NAME('msdb.dbo.syssessions', 'OBJECT', 'SELECT'), 0);
         """;
 
     /// <summary>Restituisce l'elenco dei problemi trovati (vuoto = login in sola lettura e utilizzabile).</summary>

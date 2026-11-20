@@ -1,40 +1,58 @@
 # BackupChecker
 
 Tool a riga di comando per Windows 11 che controlla i backup dei database SQL Server su più server
-e produce un report Excel (`.xlsx`) con **un foglio per server** più un foglio di riepilogo.
+e produce un report Excel (`.xlsx`) con **un foglio per server**. Gira sul PC Windows (server ponte); i server SQL
+possono essere Windows o Linux. L'esito è OK solo se il job non è fallito né in corso, il backup ha meno di 24 ore
+e il **file `.bak` è ancora al suo posto**.
 
 ## Come funziona
 
-Il tool **non crea utenti e non modifica nulla sui server**: nel codice non c'è nessun comando di
-scrittura (CREATE, ALTER, DROP, GRANT, INSERT, UPDATE, DELETE), solo SELECT.
+Il tool **non crea utenti e non modifica nulla sui server**: esegue solo SELECT con il login SQL
+`bkp_readonly`, che crei tu a mano su ogni server. Non servono utenti sulle macchine (Windows o Linux):
+anche il controllo dei file `.bak` lo fa SQL Server stesso.
 
-1. **Su ogni server, a mano:** esegui in SSMS lo script di creazione, collegato come amministratore
-   (es. d.munteanu), cambia la password ed eseguilo. Crea il login `bkp_readonly` e alla fine mostra una
-   verifica dei suoi permessi.
+1. **Su ogni server, a mano (SSMS, come amministratore):** crea `bkp_readonly` ed esegui
+   `scripts\permessi_sql_bkp_readonly.sql` (solo permessi di lettura; mostra una verifica finale).
 2. **Import (una volta):** metti IP, `bkp_readonly` e password in `servers.csv` e lancia
-   `BackupChecker importa servers.csv`. Per ogni server il tool si collega e **controlla che il login sia
-   davvero in sola lettura**. Se trova ruoli amministrativi (sysadmin, securityadmin, ...), permessi come
-   CONTROL SERVER / ALTER ANY LOGIN o permessi di scrittura su msdb, rifiuta quel server.
-3. **Report (ogni volta che vuoi):** `BackupChecker report`. Prima di leggere ogni server ripete lo stesso
-   controllo, poi genera il file Excel.
+   `BackupChecker importa servers.csv`. Il tool controlla che il login sia davvero in sola lettura
+   (nessun ruolo amministrativo, nessun permesso di scrittura o di avvio job); altrimenti rifiuta il server.
+3. **Report (ogni mattina):** `BackupChecker report`. Ripete il controllo, genera l'Excel e alla fine
+   scrive a schermo **ESITO: OK** oppure **ESITO: KO** con l'elenco dei database da guardare.
 
 Le password sono salvate cifrate con Windows DPAPI nel file `credenziali-sola-lettura.dat` **accanto all'exe**
-(il file si può leggere solo dallo stesso utente Windows sullo stesso PC). Se la cartella dell'exe non è scrivibile
-si usa `%LOCALAPPDATA%\BackupChecker`. Dopo l'import puoi cancellare `servers.csv`.
+(il file si può leggere solo dallo stesso utente Windows sullo stesso PC). Dopo l'import puoi cancellare `servers.csv`.
+
+## Controlli eseguiti
+
+| # | Controllo | Da dove | Se va male |
+|---|---|---|---|
+| 1 | Database ONLINE | `sys.databases` | `KO - DATABASE <stato>` |
+| 2 | Job di backup in esecuzione adesso | `msdb.dbo.sysjobactivity` | `KO - BACKUP IN CORSO` (ricontrollare più tardi) |
+| 3 | Ultima esecuzione del job fallita/annullata | `msdb.dbo.sysjobhistory` | `KO - JOB FALLITO (da riavviare)` |
+| 4 | Esiste un backup FULL | `msdb.dbo.backupset` | `KO - MAI BACKUPPATO` |
+| 5 | Ultimo FULL più recente della soglia (24 h) | `msdb.dbo.backupset` | `KO - NON RECENTE` |
+| 6 | Il file `.bak` dell'ultimo FULL esiste ancora | `sys.dm_os_file_exists` | `KO - FILE BACKUP NON TROVATO` |
+| 7 | Il file ha la dimensione attesa (≥ 95%) | `sys.dm_os_enumerate_filesystem` | `KO - FILE BACKUP INCOMPLETO` |
+
+Se nessun job fa il backup del database si aggiunge `| NESSUN JOB`. I job falliti vengono solo segnalati, mai riavviati.
+
+L'integrità del file (che sia ripristinabile) la verifica il job stesso con `RESTORE VERIFYONLY` subito dopo
+il backup: se fallisce, il job fallisce e il tool lo segnala al controllo 3.
 
 ## Permessi del login `bkp_readonly`
 
 | Permesso | Perché serve |
 |---|---|
-| `VIEW ANY DATABASE` | elenco dei database (`sys.databases`) |
-| `SELECT` su `msdb.dbo.backupset` | data/ora dell'ultimo backup FULL |
+| `VIEW ANY DATABASE` | elenco dei database |
+| `SELECT` su `msdb.dbo.backupset`, `backupmediafamily` | ultimo backup FULL, dimensione e percorso del file |
 | `SELECT` su `msdb.dbo.sysjobs`, `sysjobsteps` | individuare il job che fa il backup di ogni database |
-| `SELECT` su `msdb.dbo.sysjobschedules`, `sysschedules` | orario di avvio pianificato del job |
-| `SELECT` su `msdb.dbo.sysjobhistory` | esito dell'ultima esecuzione del job |
+| `SELECT` su `msdb.dbo.sysjobschedules`, `sysschedules` | orario di avvio pianificato |
+| `SELECT` su `msdb.dbo.sysjobhistory` | esito dell'ultima esecuzione |
+| `SELECT` su `msdb.dbo.sysjobactivity`, `syssessions` | job in esecuzione in questo momento |
 | ruolo `db_denydatawriter` in `msdb` | divieto esplicito di scrittura |
 
-Il tool rifiuta il login se trova privilegi amministrativi, permessi di scrittura o la possibilità di
-avviare/fermare job (`sp_start_job`, `sp_stop_job`). I job falliti vengono solo segnalati, mai riavviati.
+`sys.dm_os_file_exists` e `sys.dm_os_enumerate_filesystem` sono funzioni di sola lettura (SQL Server 2017+),
+utilizzabili di default da tutti i login: dicono solo se un file esiste e quanto è grande.
 
 ## Compilazione
 
@@ -63,30 +81,27 @@ Per eliminare il tool basta cancellare la cartella.
 
 ## Uso
 
-1. Crea `bkp_readonly` su ogni server (vedi sopra).
-2. Copia `servers.example.csv` in `servers.csv` accanto all'exe e compilalo:
+1. Crea `bkp_readonly` su ogni server ed esegui `scripts\permessi_sql_bkp_readonly.sql`.
+2. Compila `servers.csv` accanto all'exe:
 
    ```
    server;utente;password;nome
    192.168.1.10;bkp_readonly;PasswordLettura1;Gestionale
    192.168.1.20\SQLEXPRESS;bkp_readonly;PasswordLettura2;Magazzino
-   192.168.1.30,1444;bkp_readonly;PasswordLettura3;
    ```
 
    - `server`: IP o nome. Istanza nominata `IP\ISTANZA`, porta diversa `IP,porta`.
-   - `nome` (facoltativo): nome del foglio Excel. Se vuoto si usa il nome SQL del server (`@@SERVERNAME`).
+   - `nome` (facoltativo): nome del foglio Excel.
    - Se una password contiene `;` mettila tra virgolette: `"pa;ss"`.
 
-3. Avvia `BackupChecker.exe` e scegli dal menu, oppure da riga di comando:
+3. Comandi:
 
    ```
    BackupChecker importa servers.csv    verifica i login in sola lettura e li salva cifrati
-   BackupChecker report                 genera il report Excel
+   BackupChecker report                 genera il report Excel e scrive ESITO: OK / KO
    BackupChecker list                   elenca i server configurati
    BackupChecker rimuovi 192.168.1.10   toglie un server dall'elenco (sul server non tocca nulla)
    ```
-
-Per aggiungere server o cambiare una password basta rieseguire `importa` con un CSV che contiene solo quelle righe.
 
 ### Opzioni del report
 
@@ -98,6 +113,7 @@ BackupChecker report --output D:\Report --ore-soglia 24
 |---|---|---|
 | `--output` | cartella `Report` accanto all'exe | cartella del file |
 | `--ore-soglia` | 24 | oltre queste ore dall'ultimo backup FULL l'esito è `KO - NON RECENTE` |
+| `--senza-file` | | non controlla i file `.bak` (solo msdb e job) |
 
 Codici di uscita: `0` tutto ok, `1` errore, `2` alcuni server in errore. Così si può schedulare il report
 con l'Utilità di pianificazione di Windows (`BackupChecker.exe report`). Il task va eseguito con lo
@@ -108,27 +124,23 @@ stesso utente Windows che ha fatto l'importazione, per via della cifratura DPAPI
 Un foglio per server (nome dalla colonna `nome` del CSV), un database utente per riga
 (master, model, msdb, tempdb e snapshot esclusi), colonne:
 
-`Istanza | Database | Stato | Recovery | Data ultimo backup | Orario avvio | Orario fine | Esito`
+`Istanza | Database | Stato | Recovery | Data ultimo backup | Orario avvio | Orario fine | File backup | Dimensione file (MB) | Verifica file | Esito`
 
 - **Data ultimo backup / Orario fine:** dall'ultimo backup FULL registrato in msdb.
-- **Orario avvio:** orario pianificato del job SQL Agent che esegue il backup del database (`N/D` se non c'è).
-- **Esito** (nell'ordine):
-  `KO - DATABASE <stato>` se non ONLINE · `KO - JOB FALLITO (da riavviare)` se l'ultima esecuzione del job
-  pianificato è fallita o annullata · `KO - MAI BACKUPPATO` · `KO - NON RECENTE` oltre la soglia · `OK`.
-  Se nessun job fa il backup del database si aggiunge `| NESSUN JOB`.
-- Colori: verde OK, giallo OK senza job, rosso KO.
+- **Orario avvio:** orario pianificato del job che esegue il backup del database (`N/D` se non c'è).
+- **File backup / Dimensione / Verifica file:** percorso del `.bak`, dimensione letta dal disco ed esito del controllo.
+- **Esito:** vedi la tabella dei controlli. Colori: verde OK, giallo OK senza job, rosso KO.
 
 ## Requisiti sui server
 
-- SQL Server 2008 o successivo, con **autenticazione mista** (SQL Server e Windows) attiva
-  (lo script SQL lo controlla e si ferma se manca).
-- Porta SQL (di default 1433, o SQL Browser UDP 1434 per le istanze nominate) raggiungibile dal PC.
+- SQL Server con **autenticazione mista** attiva. Per il controllo dei file serve SQL Server **2017 o successivo**
+  (Windows o Linux); sulle versioni precedenti l'esito è `KO - FILE NON VERIFICABILE` (oppure usa `--senza-file`).
+- Dal PC del tool deve essere raggiungibile la porta SQL (1433 o quella dell'istanza).
 
 ## Limiti noti
 
-- Lo storico viene da `msdb`: i backup fatti con strumenti che non passano da SQL Server
-  (ad es. snapshot VM senza integrazione VSS/SQL Writer) non risultano.
-- Per i database in Availability Group i backup fatti su un'altra replica sono registrati nel `msdb`
-  di quella replica: conviene includere nel CSV tutte le repliche.
-- La connessione è cifrata con `TrustServerCertificate=true` (molti server usano certificati autofirmati).
-  Server molto vecchi senza supporto TLS 1.2 potrebbero rifiutare la connessione da Windows 11.
+- Viene controllato il file dell'**ultimo backup FULL**; DIFF e LOG no.
+- Backup su URL/cloud o fatti da software esterni (dispositivo virtuale) non hanno un file da controllare:
+  l'esito è `KO - FILE NON VERIFICABILE` con il motivo.
+- Se un amministratore toglie a `public` il permesso su `sys.dm_os_file_exists`, va concesso a `bkp_readonly`.
+- La connessione SQL è cifrata con `TrustServerCertificate=true` (molti server usano certificati autofirmati).

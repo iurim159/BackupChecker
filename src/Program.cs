@@ -137,7 +137,7 @@ public static class Program
             await gate.WaitAsync(ct);
             try
             {
-                var r = await BackupInventory.ReadAsync(c, opt.OreSoglia, ct);
+                var r = await BackupInventory.ReadAsync(c, opt.OreSoglia, !opt.SenzaFile, ct);
                 if (r.Ok)
                 {
                     int ko = r.Databases.Count(d => !d.IsOk);
@@ -160,11 +160,50 @@ public static class Program
 
         Console.WriteLine();
         Console.WriteLine("Report salvato in: " + path);
+        Riepilogo(ordered, opt.SenzaFile);
         if (apri)
         {
             try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); } catch { /* Excel non installato */ }
         }
-        return reports.All(r => r.Ok) ? 0 : 2;
+        return reports.All(r => r.Ok && r.Databases.All(d => d.IsOk)) ? 0 : 2;
+    }
+
+    /// <summary>Esito finale a colpo d'occhio: OK solo se tutti i server e tutti i database sono OK.</summary>
+    private static void Riepilogo(IReadOnlyList<ServerReport> reports, bool senzaFile)
+    {
+        var problemi = new List<string>();
+        foreach (var r in reports)
+        {
+            var nome = r.DisplayName ?? r.Server;
+            if (!r.Ok) { problemi.Add($"{nome}: KO - SERVER NON RAGGIUNGIBILE ({r.Errore})"); continue; }
+            foreach (var d in r.Databases.Where(d => !d.IsOk))
+            {
+                var det = d.VerificaFile is { Stato: not StatoFile.Ok } v && d.Esito.Contains("FILE") ? $" ({v.Dettaglio})" : "";
+                problemi.Add($"{nome} / {d.Database}: {d.Esito}{det}");
+            }
+        }
+
+        int nDb = reports.Sum(r => r.Databases.Count);
+        Console.WriteLine();
+        var prev = Console.ForegroundColor;
+        if (problemi.Count == 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("==================================================");
+            Console.WriteLine($"  ESITO: OK   {reports.Count} server, {nDb} database");
+            Console.WriteLine(senzaFile ? "  (file .bak NON controllati: opzione --senza-file)" : "  backup recenti e file .bak presenti");
+            Console.WriteLine("==================================================");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("==================================================");
+            Console.WriteLine($"  ESITO: KO   {problemi.Count} problemi su {reports.Count} server, {nDb} database");
+            Console.WriteLine("==================================================");
+            Console.ForegroundColor = prev;
+            foreach (var p in problemi) Console.WriteLine("  - " + p);
+        }
+        Console.ForegroundColor = prev;
     }
 
     // ------------------------------------------------------------------ elenco / rimozione
@@ -174,7 +213,7 @@ public static class Program
         var creds = CredentialStore.Load();
         Titolo($"Server configurati: {creds.Count}");
         foreach (var c in creds)
-            Console.WriteLine($"  {c.Server,-35} {c.DisplayName ?? "",-25} login: {c.Login,-14} creato: {c.CreatedUtc.ToLocalTime():dd/MM/yyyy HH:mm}");
+            Console.WriteLine($"  {c.Server,-22} {c.DisplayName ?? "",-25} login: {c.Login,-14} aggiornato: {c.CreatedUtc.ToLocalTime():dd/MM/yyyy HH:mm}");
         Console.WriteLine($"File credenziali: {CredentialStore.FilePath}");
         return 0;
     }
@@ -266,6 +305,7 @@ public static class Program
             Opzioni del report:
               --output <cartella>     dove salvare il file (default: cartella Report accanto all'exe)
               --ore-soglia <n>        oltre queste ore dall'ultimo backup FULL l'esito è KO - NON RECENTE (default 24)
+              --senza-file            non controlla la presenza dei file .bak (solo msdb e job)
 
             Codici di uscita: 0 = tutto ok, 1 = errore, 2 = alcuni server in errore.
             """);
@@ -279,6 +319,7 @@ public sealed class Opzioni
     public string? File { get; private set; }
     public string? Output { get; private set; }
     public int OreSoglia { get; private set; } = 24;
+    public bool SenzaFile { get; private set; }
 
     public static Opzioni Parse(string[] args)
     {
@@ -291,6 +332,7 @@ public sealed class Opzioni
             switch (a.ToLowerInvariant())
             {
                 case "--output" or "-o": o.Output = Next(); break;
+                case "--senza-file": o.SenzaFile = true; break;
                 case "--ore-soglia":
                     o.OreSoglia = int.TryParse(Next(), out var v) && v > 0 ? v : throw new ArgumentException($"Valore non valido per {a}");
                     break;

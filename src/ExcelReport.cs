@@ -11,7 +11,9 @@ public static class ExcelReport
     private static readonly XLColor Intestazione = XLColor.FromHtml("#1F4E78");
 
     private static readonly string[] Colonne =
-        { "Istanza", "Database", "Stato", "Recovery", "Data ultimo backup", "Orario avvio", "Orario fine", "Esito" };
+        { "Istanza", "Database", "Stato", "Recovery", "Data ultimo backup", "Orario avvio", "Orario fine",
+          "File backup", "Dimensione file (MB)", "Verifica file", "Esito" };
+    private const int ColEsito = 11;
 
     public static void Write(string path, IReadOnlyList<ServerReport> reports)
     {
@@ -33,8 +35,8 @@ public static class ExcelReport
         if (!r.Ok)
         {
             ws.Cell(2, 1).Value = r.Istanza ?? r.DisplayName ?? r.Server;
-            ws.Cell(2, 8).Value = "KO - SERVER NON RAGGIUNGIBILE: " + (r.Errore ?? "");
-            ws.Cell(2, 8).Style.Fill.BackgroundColor = Rosso;
+            ws.Cell(2, ColEsito).Value = "KO - SERVER NON RAGGIUNGIBILE: " + (r.Errore ?? "");
+            ws.Cell(2, ColEsito).Style.Fill.BackgroundColor = Rosso;
             Finish(ws, 2);
             return;
         }
@@ -54,8 +56,31 @@ public static class ExcelReport
             }
             ws.Cell(row, 6).Value = d.OrarioJob ?? "N/D";
             if (d.FineBackup is not null) ws.Cell(row, 7).Value = d.FineBackup.Value.ToString("HH:mm");
-            ws.Cell(row, 8).Value = d.Esito;
-            ws.Cell(row, 8).Style.Fill.BackgroundColor =
+            if (d.File.Count > 0)
+            {
+                ws.Cell(row, 8).Value = string.Join("\n", d.File.Select(f => f.Path));
+                ws.Cell(row, 8).Style.Alignment.WrapText = d.File.Count > 1;
+            }
+            if (d.VerificaFile?.Byte is long b)
+            {
+                ws.Cell(row, 9).Value = Math.Round(b / 1048576d, 1);
+                ws.Cell(row, 9).Style.NumberFormat.Format = "#,##0.0";
+            }
+            if (d.VerificaFile is not null)
+            {
+                ws.Cell(row, 10).Value = d.VerificaFile.Stato switch
+                {
+                    StatoFile.Ok => "OK - presente",
+                    StatoFile.NonTrovato => "NON TROVATO - " + d.VerificaFile.Dettaglio,
+                    StatoFile.Incompleto => "INCOMPLETO - " + d.VerificaFile.Dettaglio,
+                    _ => "NON VERIFICABILE - " + d.VerificaFile.Dettaglio,
+                };
+                ws.Cell(row, 10).Style.Fill.BackgroundColor = d.VerificaFile.Stato == StatoFile.Ok ? Verde : Rosso;
+            }
+            else if (d.FineBackup is not null) ws.Cell(row, 10).Value = "non controllato";
+
+            ws.Cell(row, ColEsito).Value = d.Esito;
+            ws.Cell(row, ColEsito).Style.Fill.BackgroundColor =
                 !d.IsOk ? Rosso : d.Esito.Contains("NESSUN JOB") ? Giallo : Verde;
             row++;
         }

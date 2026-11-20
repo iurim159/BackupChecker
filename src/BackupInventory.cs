@@ -10,10 +10,14 @@ public sealed class DatabaseBackupInfo
     public required string Recovery { get; init; }
     public bool HaJob { get; init; }
     public bool JobAbilitato { get; init; }
+    public bool JobInCorso { get; init; }           // il job di backup sta girando adesso
     public int? EsitoJobPrima { get; init; }        // run_status ultima esecuzione: 0 fallito, 1 ok, 3 annullato
     public string? OrarioJob { get; init; }         // orario della pianificazione (HH:mm)
     public DateTime? InizioBackup { get; init; }    // ultimo backup FULL
     public DateTime? FineBackup { get; init; }
+    public long? ByteAttesi { get; init; }          // dimensione del backup registrata in msdb
+    public List<BackupFile> File { get; init; } = new();
+    public VerificaFile? VerificaFile { get; set; }  // null = non controllato
 
     public string Esito { get; set; } = "";
     public bool IsOk => Esito.StartsWith("OK", StringComparison.Ordinal);
@@ -65,11 +69,23 @@ public static class BackupInventory
                d.state_desc          AS Stato,
                d.recovery_model_desc AS Recovery,
                CASE WHEN jj.job_id IS NULL THEN 0 ELSE 1 END AS HaJob,
+               CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysjobactivity a
+                                 WHERE a.job_id = jj.job_id
+                                   AND a.session_id = (SELECT MAX(ss.session_id) FROM msdb.dbo.syssessions ss)
+                                   AND a.start_execution_date IS NOT NULL
+                                   AND a.stop_execution_date IS NULL)
+                    THEN 1 ELSE 0 END AS InCorso,
                jj.JobAbilitato,
                jj.run_status         AS EsitoJobPrima,
                jj.OrarioJob,
                b.backup_start_date,
-               b.backup_finish_date
+               b.backup_finish_date,
+               b.dimensione,
+               STUFF((SELECT N'|' + CAST(ISNULL(mf.device_type, 2) AS nvarchar(5)) + N'>' + ISNULL(mf.physical_device_name, N'')
+                      FROM msdb.dbo.backupmediafamily mf
+                      WHERE mf.media_set_id = b.media_set_id AND ISNULL(mf.mirror, 0) = 0
+                      ORDER BY mf.family_sequence_number
+                      FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, N'') AS file_backup
         FROM sys.databases d
         OUTER APPLY (
             SELECT TOP (1) jd.job_id, jd.JobAbilitato, h.run_status,
@@ -86,7 +102,8 @@ public static class BackupInventory
             WHERE jd.DatabaseName = d.name
             ORDER BY h.instance_id DESC
         ) jj
-        OUTER APPLY (SELECT TOP (1) bs.backup_start_date, bs.backup_finish_date
+        OUTER APPLY (SELECT TOP (1) bs.backup_start_date, bs.backup_finish_date, bs.media_set_id,
+                            ISNULL(bs.compressed_backup_size, bs.backup_size) AS dimensione
                      FROM msdb.dbo.backupset bs
                      WHERE bs.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
                          = d.name          COLLATE SQL_Latin1_General_CP1_CI_AS
@@ -97,7 +114,7 @@ public static class BackupInventory
         ORDER BY d.name;
         """;
 
-    public static async Task<ServerReport> ReadAsync(ReadOnlyCredential cred, int oreSoglia, CancellationToken ct)
+    public static async Task<ServerReport> ReadAsync(ReadOnlyCredential cred, int oreSoglia, bool verificaFile, CancellationToken ct)
     {
         var rep = new ServerReport { Server = cred.Server, DisplayName = cred.DisplayName };
         try
@@ -132,17 +149,36 @@ public static class BackupInventory
                         Stato = r.IsDBNull(1) ? "" : r.GetString(1),
                         Recovery = r.IsDBNull(2) ? "" : r.GetString(2),
                         HaJob = Convert.ToInt32(r.GetValue(3)) == 1,
-                        JobAbilitato = !r.IsDBNull(4) && Convert.ToInt32(r.GetValue(4)) == 1,
-                        EsitoJobPrima = r.IsDBNull(5) ? null : Convert.ToInt32(r.GetValue(5)),
-                        OrarioJob = r.IsDBNull(6) ? null : r.GetString(6),
-                        InizioBackup = r.IsDBNull(7) ? null : r.GetDateTime(7),
-                        FineBackup = r.IsDBNull(8) ? null : r.GetDateTime(8),
+                        JobInCorso = Convert.ToInt32(r.GetValue(4)) == 1,
+                        JobAbilitato = !r.IsDBNull(5) && Convert.ToInt32(r.GetValue(5)) == 1,
+                        EsitoJobPrima = r.IsDBNull(6) ? null : Convert.ToInt32(r.GetValue(6)),
+                        OrarioJob = r.IsDBNull(7) ? null : r.GetString(7),
+                        InizioBackup = r.IsDBNull(8) ? null : r.GetDateTime(8),
+                        FineBackup = r.IsDBNull(9) ? null : r.GetDateTime(9),
+                        ByteAttesi = r.IsDBNull(10) ? null : (long)Convert.ToDecimal(r.GetValue(10)),
+                        File = BackupFiles.ParseList(r.IsDBNull(11) ? null : r.GetString(11)),
                     });
                 }
             }
 
             var now = rep.OraServer ?? DateTime.Now;
             foreach (var db in rep.Databases) Valuta(db, now, oreSoglia);
+
+            if (verificaFile)
+            {
+                // Controllo dei file .bak fatto da SQL Server (sola lettura)
+                string? nonDisponibile = null;
+                foreach (var db in rep.Databases.Where(d => d.FineBackup is not null))
+                {
+                    if (nonDisponibile is null)
+                    {
+                        try { db.VerificaFile = await SqlFileCheck.CheckAsync(conn, db.File, db.ByteAttesi, ct); }
+                        catch (FileCheckNonDisponibile ex) { nonDisponibile = ex.Message; }
+                    }
+                    if (nonDisponibile is not null) db.VerificaFile = new(StatoFile.NonVerificabile, nonDisponibile);
+                    ApplicaVerificaFile(db);
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -151,7 +187,22 @@ public static class BackupInventory
         return rep;
     }
 
-    /// <summary>Esito come nello script di censimento (con @Esegui = 0).</summary>
+    /// <summary>Un database risulta OK solo se anche il file di backup è stato trovato e ha la dimensione attesa.</summary>
+    public static void ApplicaVerificaFile(DatabaseBackupInfo db)
+    {
+        if (db.VerificaFile is null || !db.IsOk) return;   // già KO per altri motivi
+        string nessunJob = db.Esito.Contains("| NESSUN JOB") ? " | NESSUN JOB" : "";
+        string? esito = db.VerificaFile.Stato switch
+        {
+            StatoFile.NonTrovato => "KO - FILE BACKUP NON TROVATO",
+            StatoFile.Incompleto => "KO - FILE BACKUP INCOMPLETO",
+            StatoFile.NonVerificabile => "KO - FILE NON VERIFICABILE",
+            _ => null,
+        };
+        if (esito is not null) db.Esito = esito + nessunJob;
+    }
+
+    /// <summary>Esito come nello script di censimento (con @Esegui = 0), più il controllo del job in corso.</summary>
     public static void Valuta(DatabaseBackupInfo db, DateTime oraServer, int oreSoglia)
     {
         bool jobFallito = db.HaJob && db.JobAbilitato && db.OrarioJob is not null
@@ -160,6 +211,8 @@ public static class BackupInventory
         string esito;
         if (!string.Equals(db.Stato, "ONLINE", StringComparison.OrdinalIgnoreCase))
             esito = "KO - DATABASE " + db.Stato;
+        else if (db.JobInCorso)
+            esito = "KO - BACKUP IN CORSO";
         else if (jobFallito)
             esito = "KO - JOB FALLITO (da riavviare)";
         else if (db.FineBackup is null)
