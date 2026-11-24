@@ -1,0 +1,13 @@
+# Associazione server SQL -> bucket Wasabi. Si importa con:  BackupChecker importa wasabi.csv
+# Le chiavi NON vanno qui: il tool le chiede a schermo.
+# server  = nome del foglio (colonna "nome" del servers.csv) oppure IP del server
+# regione = regione del bucket (es. eu-south-1, eu-central-1, eu-central-2, eu-west-2)
+server;bucket;regione
+FORJ-MSSQL-C1-P1;wiit.forj.share.tn.01.forj.mssql.c1.p1;eu-south-1
+ISO-MSSQL-C1-P1;wiit.kwanto.share.tn.01.iso.mssql.c1.p1;eu-central-2
+ISO-MSSQL-C1-P2;wiit.kwanto.share.tn.01.iso.mssql.c1.p2;eu-central-1
+ISO-MSSQL-C1-P3;wiit.kwanto.share.tn.01.iso.mssql.c1.p3;eu-west-2
+SOL-MSSQL-8;wiit.solution.share.tn.01.sol.mssql.all;eu-central-1
+SOL-MSSQL-C1-P1;wiit.solution.share.tn.01.sol.mssql.all;eu-central-1
+SOL-MSSQL-C1-P2;wiit.solution.share.tn.01.sol.mssql.all;eu-central-1
+SOL-MSSQL-C1-P3;wiit.solution.share.tn.01.sol.mssql.all;eu-central-1

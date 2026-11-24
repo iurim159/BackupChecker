@@ -12,8 +12,8 @@ public static class ExcelReport
 
     private static readonly string[] Colonne =
         { "Istanza", "Database", "Stato", "Recovery", "Data ultimo backup", "Orario avvio", "Orario fine",
-          "File backup", "Dimensione file (MB)", "Verifica file", "Esito" };
-    private const int ColEsito = 11;
+          "File backup", "Dimensione file (MB)", "Verifica file", "Copia Wasabi", "Esito" };
+    private const int ColEsito = 12;
 
     public static void Write(string path, IReadOnlyList<ServerReport> reports)
     {
@@ -78,6 +78,19 @@ public static class ExcelReport
                 ws.Cell(row, 10).Style.Fill.BackgroundColor = d.VerificaFile.Stato == StatoFile.Ok ? Verde : Rosso;
             }
             else if (d.FineBackup is not null) ws.Cell(row, 10).Value = "non controllato";
+
+            if (d.VerificaCloud is not null)
+            {
+                ws.Cell(row, 11).Value = d.VerificaCloud.Stato switch
+                {
+                    StatoFile.Ok => "OK - " + d.VerificaCloud.Dettaglio,
+                    StatoFile.NonTrovato => "NON TROVATA - " + d.VerificaCloud.Dettaglio,
+                    StatoFile.Incompleto => "INCOMPLETA - " + d.VerificaCloud.Dettaglio,
+                    _ => "NON VERIFICABILE - " + d.VerificaCloud.Dettaglio,
+                };
+                ws.Cell(row, 11).Style.Fill.BackgroundColor = d.VerificaCloud.Stato == StatoFile.Ok ? Verde : Rosso;
+            }
+            else if (d.FineBackup is not null) ws.Cell(row, 11).Value = r.NotaCloud ?? "-";
 
             ws.Cell(row, ColEsito).Value = d.Esito;
             ws.Cell(row, ColEsito).Style.Fill.BackgroundColor =

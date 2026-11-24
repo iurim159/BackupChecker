@@ -30,9 +30,11 @@ public static class Program
 
             return opt.Comando switch
             {
-                "importa" or "import" => await ImportaAsync(opt.File ?? TrovaCsv(), cts.Token),
+                "importa" or "import" => await ImportaQualsiasiAsync(opt.File ?? TrovaCsv(), cts.Token),
                 "report" => await ReportAsync(opt, apri: false, cts.Token),
                 "list" or "elenco" => Elenco(),
+                "wasabi" => await WasabiImportaAsync(opt.File ?? TrovaFile("wasabi.csv"), cts.Token),
+                "elenco-wasabi" or "wasabi-elenco" => await WasabiElencoAsync(opt.File ?? throw new ArgumentException("Indicare il server: BackupChecker elenco-wasabi SOL-MSSQL-C1-P3"), cts.Token),
                 "rimuovi" or "remove" => Rimuovi(opt.File ?? throw new ArgumentException("Indicare il server da rimuovere: BackupChecker rimuovi 192.168.1.10")),
                 "help" or "-h" or "--help" or "/?" => Aiuto(),
                 _ => Aiuto(1),
@@ -53,10 +55,11 @@ public static class Program
         {
             Console.WriteLine();
             Titolo("BackupChecker - controllo backup SQL Server");
-            Console.WriteLine("  1) Importa/aggiorna server e credenziali in sola lettura (da servers.csv)");
+            Console.WriteLine("  1) Importa un CSV (servers.csv per SQL oppure wasabi.csv per Wasabi)");
             Console.WriteLine("  2) Genera report Excel");
             Console.WriteLine("  3) Mostra server configurati");
             Console.WriteLine("  4) Togli un server dall'elenco");
+            Console.WriteLine("  5) Mostra gli ultimi file di un bucket Wasabi");
             Console.WriteLine("  0) Esci");
             Console.Write("Scelta: ");
             var c = Console.ReadLine()?.Trim();
@@ -64,12 +67,16 @@ public static class Program
             {
                 switch (c)
                 {
-                    case "1": await ImportaAsync(ChiediCsv(), ct); break;
+                    case "1": await ImportaQualsiasiAsync(ChiediCsv(), ct); break;
                     case "2": await ReportAsync(opt, apri: true, ct); break;
                     case "3": Elenco(); break;
                     case "4":
                         Console.Write("Server da togliere (come scritto nel CSV): ");
                         Rimuovi(Console.ReadLine()?.Trim() ?? "");
+                        break;
+                    case "5":
+                        Console.Write("Server (come nel wasabi.csv): ");
+                        await WasabiElencoAsync(Console.ReadLine()?.Trim() ?? "", ct);
                         break;
                     case "0" or null: return 0;
                 }
@@ -130,7 +137,14 @@ public static class Program
             return 1;
         }
 
-        Titolo($"Lettura backup da {creds.Count} server (login in sola lettura)");
+        WasabiCheck? wasabi = null;
+        if (!opt.SenzaWasabi)
+        {
+            var wcfg = WasabiStore.Load();
+            if (wcfg is not null) wasabi = new WasabiCheck(wcfg, opt.OreSogliaWasabi);
+        }
+
+        Titolo($"Lettura backup da {creds.Count} server (login in sola lettura){(wasabi is null ? "" : " + copie su Wasabi")}");
         var gate = new SemaphoreSlim(Parallelismo);
         var reports = await Task.WhenAll(creds.Select(async c =>
         {
@@ -138,10 +152,16 @@ public static class Program
             try
             {
                 var r = await BackupInventory.ReadAsync(c, opt.OreSoglia, !opt.SenzaFile, ct);
+                if (wasabi is not null) await wasabi.ApplicaAsync(r, ct);
+                r.NotaCloud = opt.SenzaWasabi ? "non controllato (--senza-wasabi)"
+                            : wasabi is null ? "Wasabi non configurato"
+                            : wasabi.BucketPer(r) is null ? "nessun bucket configurato" : null;
                 if (r.Ok)
                 {
                     int ko = r.Databases.Count(d => !d.IsOk);
-                    Riga(ko == 0, c.Server, $"{r.Databases.Count} database - {ko} KO");
+                    string cloud = wasabi?.BucketPer(r) is { } b ? $" (Wasabi: {b.Bucket})" : "";
+                    Riga(ko == 0 ? "[OK]     " : "[KO]     ", ko == 0 ? ConsoleColor.Green : ConsoleColor.Yellow,
+                         c.Server, $"{r.Databases.Count} database - {ko} KO{cloud}");
                 }
                 else Riga(false, c.Server, r.Errore!);
                 return r;
@@ -178,7 +198,8 @@ public static class Program
             if (!r.Ok) { problemi.Add($"{nome}: KO - SERVER NON RAGGIUNGIBILE ({r.Errore})"); continue; }
             foreach (var d in r.Databases.Where(d => !d.IsOk))
             {
-                var det = d.VerificaFile is { Stato: not StatoFile.Ok } v && d.Esito.Contains("FILE") ? $" ({v.Dettaglio})" : "";
+                var det = d.VerificaFile is { Stato: not StatoFile.Ok } v && d.Esito.Contains("FILE") ? $" ({v.Dettaglio})"
+                        : d.VerificaCloud is { Stato: not StatoFile.Ok } w && d.Esito.Contains("WASABI") ? $" ({w.Dettaglio})" : "";
                 problemi.Add($"{nome} / {d.Database}: {d.Esito}{det}");
             }
         }
@@ -250,6 +271,117 @@ public static class Program
 
     private static readonly object ConsoleLock = new();
 
+    private static void Riga(string tag, ConsoleColor colore, string server, string msg)
+    {
+        lock (ConsoleLock)
+        {
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = colore;
+            Console.Write("  " + tag);
+            Console.ForegroundColor = prev;
+            Console.WriteLine($"{server}: {msg}");
+        }
+    }
+
+    private static string TrovaFile(string nome)
+    {
+        foreach (var dir in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory })
+        {
+            var p = Path.Combine(dir, nome);
+            if (File.Exists(p)) return p;
+        }
+        throw new FileNotFoundException($"File {nome} non trovato (cercato nella cartella corrente e in quella del programma).");
+    }
+
+    /// <summary>Lettura da tastiera senza mostrare i caratteri.</summary>
+    private static string LeggiNascosto(string prompt)
+    {
+        Console.Write(prompt);
+        var sb = new StringBuilder();
+        while (true)
+        {
+            var k = Console.ReadKey(intercept: true);
+            if (k.Key == ConsoleKey.Enter) break;
+            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); } continue; }
+            if (!char.IsControl(k.KeyChar)) { sb.Append(k.KeyChar); Console.Write('*'); }
+        }
+        Console.WriteLine();
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>Un solo comando "importa": capisce dalle colonne se è il CSV dei server SQL o quello di Wasabi.</summary>
+    private static Task<int> ImportaQualsiasiAsync(string csv, CancellationToken ct)
+    {
+        var header = File.ReadLines(csv).Select(l => l.Trim())
+            .FirstOrDefault(l => l.Length > 0 && !l.StartsWith('#')) ?? "";
+        bool isWasabi = header.Split(';', ',').Any(c => c.Trim().Equals("bucket", StringComparison.OrdinalIgnoreCase));
+        return isWasabi ? WasabiImportaAsync(csv, ct) : ImportaAsync(csv, ct);
+    }
+
+    // ------------------------------------------------------------------ wasabi
+
+    /// <summary>
+    /// Legge wasabi.csv (server;bucket;regione), chiede Access Key e Secret Key a schermo,
+    /// prova a elencare ogni bucket e, se tutto risponde, salva la configurazione cifrata.
+    /// </summary>
+    private static async Task<int> WasabiImportaAsync(string csv, CancellationToken ct)
+    {
+        var buckets = WasabiStore.LoadCsv(csv);
+        if (buckets.Count == 0) { Errore("Nessuna riga in " + csv); return 1; }
+
+        var server = CredentialStore.Load();
+        foreach (var b in buckets.Where(b => !server.Any(c => string.Equals(c.DisplayName, b.Server, StringComparison.OrdinalIgnoreCase)
+                                                           || string.Equals(c.Server, b.Server, StringComparison.OrdinalIgnoreCase))))
+            Avviso($"Attenzione: '{b.Server}' non corrisponde a nessun server importato (usa il nome del foglio o l'IP del servers.csv).");
+
+        var precedente = WasabiStore.Load();
+        Titolo("Configurazione Wasabi (chiavi in sola lettura)");
+        if (precedente is not null) Console.WriteLine("Premi Invio senza scrivere nulla per tenere le chiavi già salvate.");
+        var ak = LeggiNascosto("Access Key: ");
+        var sk = LeggiNascosto("Secret Key: ");
+        if (ak.Length == 0 && sk.Length == 0 && precedente is not null) { ak = precedente.AccessKey; sk = precedente.SecretKey; }
+        if (ak.Length == 0 || sk.Length == 0) { Errore("Access Key e Secret Key sono obbligatorie."); return 1; }
+
+        int ok = 0;
+        var distinti = buckets.Select(b => (b.Bucket, b.Regione)).Distinct().ToList();
+        foreach (var (bucket, regione) in distinti)
+        {
+            try
+            {
+                var primi = await WasabiClient.ListAsync(ak, sk, bucket, regione, 5, ct);
+                Riga(true, bucket, $"raggiungibile ({regione}), letti {primi.Count} file di prova");
+                ok++;
+            }
+            catch (Exception ex) { Riga(false, bucket, WasabiClient.FriendlyError(ex)); }
+        }
+
+        Console.WriteLine();
+        if (ok != distinti.Count)
+        {
+            Errore("Configurazione NON salvata: correggere i bucket in errore e rilanciare.");
+            return 2;
+        }
+        WasabiStore.Save(new WasabiConfig(ak, sk, buckets, DateTime.UtcNow));
+        Console.WriteLine($"Configurazione Wasabi salvata cifrata in: {WasabiStore.FilePath}");
+        return 0;
+    }
+
+    /// <summary>Mostra gli ultimi file di un bucket: serve a vedere come sono organizzati i .bak.</summary>
+    private static async Task<int> WasabiElencoAsync(string server, CancellationToken ct)
+    {
+        var cfg = WasabiStore.Load() ?? throw new InvalidOperationException("Wasabi non configurato: lanciare prima BackupChecker importa wasabi.csv");
+        var b = cfg.Buckets.FirstOrDefault(x => string.Equals(x.Server, server, StringComparison.OrdinalIgnoreCase)
+                                             || string.Equals(x.Bucket, server, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ArgumentException($"'{server}' non è nel wasabi.csv importato.");
+        Titolo($"Bucket {b.Bucket} ({b.Regione})");
+        var all = await WasabiClient.ListAsync(cfg.AccessKey, cfg.SecretKey, b.Bucket, b.Regione, null, ct);
+        Console.WriteLine($"File nel bucket: {all.Count:N0}   dimensione totale: {all.Sum(o => o.Size) / 1073741824d:N1} GB");
+        Console.WriteLine("Ultimi 20 caricati:");
+        foreach (var o in all.OrderByDescending(o => o.LastModified).Take(20))
+            Console.WriteLine($"  {o.LastModified?.ToLocalTime():dd/MM/yyyy HH:mm}  {o.Size / 1048576d,10:N1} MB  {o.Key}");
+        return 0;
+    }
+
     private static void Riga(bool ok, string server, string msg)
     {
         lock (ConsoleLock)
@@ -294,10 +426,12 @@ public static class Program
 
             Uso:
               BackupChecker                         menu interattivo
-              BackupChecker importa [servers.csv]   verifica i login in sola lettura del CSV e li salva cifrati
+              BackupChecker importa servers.csv     verifica i login SQL in sola lettura e li salva cifrati
+              BackupChecker importa wasabi.csv      configura le copie su Wasabi (chiede le chiavi a schermo)
               BackupChecker report [opzioni]        genera il report Excel (un foglio per server)
               BackupChecker list                    mostra i server configurati
               BackupChecker rimuovi <server>        toglie un server dall'elenco
+              BackupChecker elenco-wasabi <server>  mostra gli ultimi file nel bucket Wasabi del server
 
             Il tool NON crea utenti e NON modifica nulla sui server: il login in sola lettura
             si crea a mano sul server.
@@ -306,6 +440,9 @@ public static class Program
               --output <cartella>     dove salvare il file (default: cartella Report accanto all'exe)
               --ore-soglia <n>        oltre queste ore dall'ultimo backup FULL l'esito è KO - NON RECENTE (default 24)
               --senza-file            non controlla la presenza dei file .bak (solo msdb e job)
+              --senza-wasabi          non controlla le copie su Wasabi
+              --ore-soglia-wasabi <n> età massima dell'ultima copia su Wasabi se il backup più recente
+                                      non è ancora stato copiato (default 48)
 
             Codici di uscita: 0 = tutto ok, 1 = errore, 2 = alcuni server in errore.
             """);
@@ -320,6 +457,8 @@ public sealed class Opzioni
     public string? Output { get; private set; }
     public int OreSoglia { get; private set; } = 24;
     public bool SenzaFile { get; private set; }
+    public bool SenzaWasabi { get; private set; }
+    public int OreSogliaWasabi { get; private set; } = 48;
 
     public static Opzioni Parse(string[] args)
     {
@@ -333,6 +472,10 @@ public sealed class Opzioni
             {
                 case "--output" or "-o": o.Output = Next(); break;
                 case "--senza-file": o.SenzaFile = true; break;
+                case "--senza-wasabi": o.SenzaWasabi = true; break;
+                case "--ore-soglia-wasabi":
+                    o.OreSogliaWasabi = int.TryParse(Next(), out var w) && w > 0 ? w : throw new ArgumentException($"Valore non valido per {a}");
+                    break;
                 case "--ore-soglia":
                     o.OreSoglia = int.TryParse(Next(), out var v) && v > 0 ? v : throw new ArgumentException($"Valore non valido per {a}");
                     break;

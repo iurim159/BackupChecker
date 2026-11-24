@@ -35,7 +35,7 @@ try {
     & $dotnet build-server shutdown | Out-Null
 
     # Nella cartella finale tieni solo l'exe e l'esempio CSV
-    Get-ChildItem $out | Where-Object { $_.Name -notin @('BackupChecker.exe', 'servers.example.csv') } | Remove-Item -Recurse -Force
+    Get-ChildItem $out | Where-Object { $_.Name -notin @('BackupChecker.exe', 'servers.example.csv', 'wasabi.example.csv') } | Remove-Item -Recurse -Force
 
     Write-Host ''
     Write-Host "Fatto: $out\BackupChecker.exe" -ForegroundColor Green

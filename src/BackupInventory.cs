@@ -18,6 +18,7 @@ public sealed class DatabaseBackupInfo
     public long? ByteAttesi { get; init; }          // dimensione del backup registrata in msdb
     public List<BackupFile> File { get; init; } = new();
     public VerificaFile? VerificaFile { get; set; }  // null = non controllato
+    public VerificaFile? VerificaCloud { get; set; } // copia su Wasabi; null = server senza bucket / non controllato
 
     public string Esito { get; set; } = "";
     public bool IsOk => Esito.StartsWith("OK", StringComparison.Ordinal);
@@ -28,6 +29,7 @@ public sealed class ServerReport
     public required string Server { get; init; }          // come indicato nel CSV (IP/istanza)
     public string? DisplayName { get; init; }
     public string? Istanza { get; set; }                   // @@SERVERNAME
+    public string? NotaCloud { get; set; }                 // perché la copia su Wasabi non viene controllata
     public DateTime? OraServer { get; set; }
     public List<DatabaseBackupInfo> Databases { get; } = new();
     public string? Errore { get; set; }
@@ -197,6 +199,21 @@ public static class BackupInventory
             StatoFile.NonTrovato => "KO - FILE BACKUP NON TROVATO",
             StatoFile.Incompleto => "KO - FILE BACKUP INCOMPLETO",
             StatoFile.NonVerificabile => "KO - FILE NON VERIFICABILE",
+            _ => null,
+        };
+        if (esito is not null) db.Esito = esito + nessunJob;
+    }
+
+    /// <summary>Un database risulta OK solo se c'è anche la copia su Wasabi (per i server con bucket configurato).</summary>
+    public static void ApplicaVerificaCloud(DatabaseBackupInfo db)
+    {
+        if (db.VerificaCloud is null || !db.IsOk) return;   // già KO per altri motivi
+        string nessunJob = db.Esito.Contains("| NESSUN JOB") ? " | NESSUN JOB" : "";
+        string? esito = db.VerificaCloud.Stato switch
+        {
+            StatoFile.NonTrovato => "KO - COPIA WASABI NON TROVATA",
+            StatoFile.Incompleto => "KO - COPIA WASABI INCOMPLETA",
+            StatoFile.NonVerificabile => "KO - WASABI NON VERIFICABILE",
             _ => null,
         };
         if (esito is not null) db.Esito = esito + nessunJob;

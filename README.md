@@ -33,11 +33,30 @@ Le password sono salvate cifrate con Windows DPAPI nel file `credenziali-sola-le
 | 5 | Ultimo FULL più recente della soglia (24 h) | `msdb.dbo.backupset` | `KO - NON RECENTE` |
 | 6 | Il file `.bak` dell'ultimo FULL esiste ancora | `sys.dm_os_file_exists` | `KO - FILE BACKUP NON TROVATO` |
 | 7 | Il file ha la dimensione attesa (≥ 95%) | `sys.dm_os_enumerate_filesystem` | `KO - FILE BACKUP INCOMPLETO` |
+| 8 | Copia del `.bak` presente su Wasabi (se il server ha un bucket) | API S3 ListObjectsV2 | `KO - COPIA WASABI NON TROVATA` / `INCOMPLETA` |
 
 Se nessun job fa il backup del database si aggiunge `| NESSUN JOB`. I job falliti vengono solo segnalati, mai riavviati.
 
 L'integrità del file (che sia ripristinabile) la verifica il job stesso con `RESTORE VERIFYONLY` subito dopo
 il backup: se fallisce, il job fallisce e il tool lo segnala al controllo 3.
+
+## Copie su Wasabi (v7)
+
+Per i server che hanno un bucket Wasabi, il tool controlla anche che il `.bak` dell'ultimo FULL sia presente
+nel bucket, cercandolo **per nome in tutto il bucket** (qualunque cartella) e confrontandone la dimensione.
+Esiti: `KO - COPIA WASABI NON TROVATA`, `KO - COPIA WASABI INCOMPLETA`, `KO - WASABI NON VERIFICABILE`.
+I server senza bucket nel `wasabi.csv` non vengono controllati su Wasabi.
+
+- Usa solo l'API S3 **ListObjectsV2** (elenco dei file): nessun download, nessuna scrittura.
+- Serve una chiave Wasabi di **sola lettura** (policy con `s3:ListBucket` sui bucket dei backup).
+- Configurazione: copia `wasabi.example.csv` in `wasabi.csv`, lancia `BackupChecker importa wasabi.csv` (lo stesso comando dei server SQL: il tool riconosce il file dalle colonne):
+  il tool chiede **Access Key** e **Secret Key** a schermo (non vanno scritte in nessun file), prova ogni
+  bucket e salva tutto cifrato in `wasabi.dat`. Poi cancella `wasabi.csv`.
+- `BackupChecker elenco-wasabi <server>` mostra gli ultimi 20 file caricati nel bucket di quel server.
+- La copia verso Wasabi avviene una volta al giorno (verso le 23:00): se il backup più recente non è ancora
+  stato copiato, il tool accetta l'**ultima copia dello stesso database** purché abbia meno di 48 ore
+  (`--ore-soglia-wasabi <n>` per cambiare la soglia).
+- `--senza-wasabi` salta il controllo.
 
 ## Permessi del login `bkp_readonly`
 
